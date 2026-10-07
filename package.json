@@ -1,0 +1,13 @@
+{
+  "name": "promptcam",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Free teleprompter and recorder. The site itself is the static files in prompcam-web/; everything here is for testing it.",
+  "scripts": {
+    "test": "playwright test",
+    "serve": "node tests/serve.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0"
+  }
+}
