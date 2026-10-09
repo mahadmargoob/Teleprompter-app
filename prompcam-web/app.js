@@ -111,7 +111,14 @@ const DEFS = [
   {key:'align', type:'seg', label:'Alignment', def:'left', options:[['left','Left'],['center','Centre']]},
   {key:'dimRead', type:'toggle', label:'Dim words already read', def:true},
   {key:'mirror', type:'toggle', label:'Mirror text (for glass rigs)', def:false},
-  {key:'quality', type:'seg', label:'Video quality', def:'1080', options:[['720','720p, smaller files'],['1080','1080p']]},
+  {key:'quality', type:'seg', label:'Video quality', def:'1080', options:[['720','720p'],['1080','1080p'],['max','Maximum']],
+   help:'Higher quality means bigger files: roughly 60, 120 and 260 MB per minute. Maximum asks for 4K, which only some phones allow inside a browser; otherwise you get the best the phone offers. Long takes at Maximum can run a phone out of memory.'},
+  {key:'fps', type:'seg', label:'Frame rate', def:30, options:[[30,'30 fps'],[60,'60 fps']]},
+  {key:'framing', type:'seg', label:'Camera preview', def:'exact', options:[['exact','Exact framing'],['fill','Fill screen']],
+   help:'Exact shows the whole picture that gets recorded. Fill screen crops the edges of the preview to fill your screen, but the recording still includes them.'},
+  {key:'audioMode', type:'seg', label:'Microphone processing', def:'studio', options:[['studio','Studio (none)'],['voice','Voice (cleaned up)']],
+   help:'Studio records the microphone as it is, which is best for a good external microphone. Voice lets the browser reduce noise and even out the volume, which can help with a phone microphone in a noisy room.'},
+  {key:'micId', type:'device', def:''},
   {key:'countdown', type:'seg', label:'Countdown before recording', def:3, options:[[0,'Off'],[3,'3s'],[5,'5s'],[10,'10s']]},
   {key:'frontCamera', type:'toggle', label:'Start with the front camera', def:true},
   {key:'mirrorPreview', type:'toggle', label:'Mirror the selfie preview', def:true},
@@ -125,7 +132,7 @@ DEFS.forEach(d => { DEF[d.key] = d; DEFAULTS[d.key] = d.def; });
 const SETTINGS_GROUPS = [
   ['Appearance', ['theme']],
   ['Prompter', ['mode','speed','fontSize','textHeight','guideLinePos','bgOpacity','margin','align','dimRead','mirror']],
-  ['Recording', ['quality','countdown','frontCamera','mirrorPreview','autoStop']],
+  ['Recording', ['quality','fps','framing','audioMode','countdown','frontCamera','mirrorPreview','autoStop']],
   ['Voice', ['lang']]
 ];
 const SHEET_KEYS = ['mode','fontSize','textHeight','guideLinePos','bgOpacity','margin','align','dimRead','mirror','mirrorPreview','countdown','autoStop'];
@@ -143,6 +150,7 @@ function sanitizeSettings(raw){
     const v = raw[d.key];
     if(d.type === 'range'){ if(typeof v === 'number' && v >= d.min && v <= d.max) out[d.key] = v; }
     else if(d.type === 'toggle'){ if(typeof v === 'boolean') out[d.key] = v; }
+    else if(d.type === 'device'){ if(typeof v === 'string' && v.length <= 300) out[d.key] = v; }
     else if(d.options.some(o => o[0] === v)) out[d.key] = v;
   }
   return out;
@@ -180,12 +188,15 @@ function controlHtml(d, prefix){
   return '<div class="field"><label for="' + id + '"><span>' + d.label + '</span></label><select id="' + id + '" data-key="' + d.key + '">' +
     d.options.map(o => '<option value="' + o[0] + '"' + (o[0] === v ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></div>';
 }
+// These change what the camera or microphone is asked for, so the camera has to be reopened.
+const CAM_RESTART_KEYS = ['quality', 'fps', 'audioMode', 'micId'];
 function setSetting(key, val){
   settings[key] = val;
   lsSet(K.settings, settings);
   if(key === 'theme') applyTheme();
   if(!isView('prompter')) return;
   if(key === 'mode') onModeChosen();
+  else if(CAM_RESTART_KEYS.includes(key)) restartCamera();
   else applyPrompterStyle();
 }
 document.addEventListener('input', e => {
@@ -638,7 +649,7 @@ const S = {
   sid:0, script:null, origin:'library',
   wordEls:[], wordText:[], pauses:[], mNorm:[], mMap:[], N:0, lines:[], guideY:0,
   pos:0, playing:false, scrubbing:false, holdUntil:0, holdEl:null,
-  wpm:140, modeOverride:null, front:true, noCamera:false,
+  wpm:140, modeOverride:null, front:true, noCamera:false, camId:null, micCheck:false,
   ty:null, readIdx:0, raf:0, last:0, uiAt:0,
   fm:0, sr:null, srStarts:[], speakNoResult:0,
   countdown:0, capIdx:0, endTimer:0, fadeTimer:0
@@ -728,6 +739,7 @@ function applyPrompterStyle(){
   $('guideLine').style.top = S.guideY + 'px';
   $('guideLine').style.height = Math.round(settings.fontSize * 1.36) + 'px';
   updateCameraMirror();
+  layoutCamera();
   measure();
   render(true);
 }
@@ -832,7 +844,7 @@ function onReachedEnd(){
 
 function tick(ts){
   S.raf = requestAnimationFrame(tick);
-  const dt = S.last ? Math.min(0.1, (ts - S.last) / 1000) : 0;
+  const dt = S.last ? Math.min(0.25, (ts - S.last) / 1000) : 0;
   S.last = ts;
   updateVad(dt, ts);
   if(S.playing){
@@ -921,6 +933,12 @@ function updateStatus(){
   }
   $('micMeter').hidden = !A.an;
   if(A.an) $('micFill').style.transform = 'scaleX(' + clamp(A.level * 7, 0, 1).toFixed(3) + ')';
+  const cf = $('micCheckFill');
+  if(cf && S.micCheck && A.an){
+    const db = 20 * Math.log10(Math.max(A.peak, 1e-4));
+    cf.style.transform = 'scaleX(' + clamp((db + 60) / 60, 0, 1).toFixed(3) + ')';
+    $('micCheckText').textContent = micVerdict(db);
+  }
 }
 // Controls only dim while the script is actually moving. Before that they
 // stay fully visible, since that is when you are looking for them.
@@ -943,12 +961,124 @@ function jumpLines(n){
   setPos(S.lines[clamp(lineAt(S.pos) + n, 0, S.lines.length - 1)].start);
 }
 
-function openSheet(){
-  $('sheetBody').innerHTML = SHEET_KEYS.map(k => controlHtml(DEF[k], 'sh')).join('');
+let sheetTab = 'text';
+function openSheet(tab){
   $('quickSheet').hidden = false;
+  showSheetTab(tab || sheetTab);
   $('view-prompter').classList.remove('dimmed');
 }
-function closeSheet(){ $('quickSheet').hidden = true; armFade(); }
+function showSheetTab(t){
+  sheetTab = t;
+  const text = t === 'text';
+  $('shTabText').classList.toggle('on', text); $('shTabText').setAttribute('aria-selected', text);
+  $('shTabCam').classList.toggle('on', !text); $('shTabCam').setAttribute('aria-selected', !text);
+  $('paneText').hidden = !text;
+  $('paneCam').hidden = text;
+  if(text){
+    stopMicCheck();
+    $('sheetBody').innerHTML = SHEET_KEYS.map(k => controlHtml(DEF[k], 'sh')).join('');
+  } else {
+    renderCamPane();
+    refreshDevices();
+  }
+}
+function closeSheet(){ stopMicCheck(); $('quickSheet').hidden = true; armFade(); }
+
+/* ---- camera and microphone tab ---- */
+function deviceOptions(list, selected, defaultLabel, noun){
+  let h = '<option value="">' + defaultLabel + '</option>';
+  list.forEach((d, i) => {
+    if(!d.deviceId || d.deviceId === 'default' || d.deviceId === 'communications') return;
+    h += '<option value="' + esc(d.deviceId) + '"' + (d.deviceId === selected ? ' selected' : '') + '>' + esc(d.label || (noun + ' ' + (i + 1))) + '</option>';
+  });
+  return h;
+}
+function flagText(v){ return v === true ? 'on' : (v === false ? 'off' : 'unknown'); }
+function camInfoHtml(){
+  const i = cam.info;
+  if(!i) return '<p class="hint">The camera is off.</p>';
+  const q = QUALITY[settings.quality] || QUALITY['1080'];
+  let h = '<p class="hint"><b>Camera:</b> ' + esc(i.cam || 'camera') + ' · ' + i.w + '×' + i.h + (i.fps ? ' at ' + i.fps + ' fps' : '') + '<br>' +
+    '<b>Microphone:</b> ' + (i.hasAudio
+      ? esc(i.mic || 'microphone') + (i.sr ? ' · ' + (i.sr / 1000).toFixed(1) + ' kHz' : '') + (i.ch ? ' · ' + i.ch + ' channel' + (i.ch === 1 ? '' : 's') : '') +
+        '<br>Noise reduction ' + flagText(i.ns) + ' · auto volume ' + flagText(i.agc) + ' · echo cancel ' + flagText(i.ec)
+      : 'none found') + '</p>';
+  if(Math.max(i.w, i.h) < q.long * 0.9){
+    h += '<p class="hint warn">You asked for up to ' + q.short + 'p but this browser provided ' + i.w + '×' + i.h +
+      '. Phones limit what a website can capture, and the built-in Camera app can do more.</p>';
+  }
+  return h;
+}
+function renderCamPane(){
+  const on = !!cam.stream;
+  const lenses = cam.devices.video.filter(d => d.deviceId);
+  const mics = cam.devices.audio.filter(d => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
+  let h = '<div class="field"><label for="zoomRange"><span>Zoom</span><output id="zoomOut">' + zoomText() + '</output></label>' +
+    '<input type="range" id="zoomRange" min="' + cam.zmin + '" max="' + cam.zmax + '" step="0.05" value="' + cam.zoom + '"' + (on ? '' : ' disabled') + '>' +
+    '<p class="hint">' + (cam.native
+      ? 'Uses the camera\'s own zoom, so the picture stays sharp. You can also pinch the preview.'
+      : 'This phone doesn\'t let websites zoom the camera, so zoom crops the picture and looks a little softer. Set it before you press record, or pinch the preview.') +
+    ' To fit more in, move back or pick a wider lens below if your phone lists one.</p></div>';
+  h += controlHtml(DEF.framing, 'cm');
+  h += controlHtml(DEF.quality, 'cm');
+  h += controlHtml(DEF.fps, 'cm');
+  if(lenses.length > 2){
+    h += '<div class="field"><label for="selLens"><span>Lens</span></label><select id="selLens">' +
+      deviceOptions(cam.devices.video, S.camId, 'Automatic (front or back)', 'Camera') + '</select></div>';
+  }
+  if(mics.length){
+    h += '<div class="field"><label for="selMic"><span>Microphone</span></label><select id="selMic">' +
+      deviceOptions(cam.devices.audio, settings.micId, 'Automatic (whatever the phone is using)', 'Microphone') + '</select>' +
+      '<p class="hint">If you plugged in an external microphone and the sound is quiet, choose it here.</p></div>';
+  }
+  h += controlHtml(DEF.audioMode, 'cm');
+  h += '<div class="field"><div class="fieldLabel"><span>Microphone check</span></div>' +
+    '<button class="btn small secondary" id="btnMicCheck">' + (S.micCheck ? 'Stop check' : 'Start check') + '</button>' +
+    '<div class="levelBar"><span id="micCheckFill"></span></div>' +
+    '<p class="hint" id="micCheckText">Speak normally and watch the bar. It should reach the middle or beyond, but not hit the end.</p></div>';
+  h += '<div class="field"><div class="fieldLabel"><span>In use right now</span></div>' + camInfoHtml() + '</div>';
+  $('camBody').innerHTML = h;
+}
+function micVerdict(db){
+  const t = Math.round(db) + ' dB';
+  if(db < -60) return 'No sound is reaching the app.';
+  if(db < -42) return t + ' · very quiet. Move closer, or pick another microphone above.';
+  if(db < -30) return t + ' · a bit quiet';
+  if(db > -4) return t + ' · too loud, it may distort';
+  return t + ' · good level';
+}
+function startMicCheck(){
+  if(R){ toast('Stop recording first.'); return; }
+  if(!cam.stream || !cam.stream.getAudioTracks().length){ toast('The camera and microphone need to be on first.'); return; }
+  S.micCheck = true;
+  ensureAudio();
+  if(!A.an){ S.micCheck = false; closeAudio(); toast('This browser can\'t measure the microphone level.'); }
+  const b = $('btnMicCheck');
+  if(b) b.textContent = S.micCheck ? 'Stop check' : 'Start check';
+}
+function stopMicCheck(){
+  if(!S.micCheck) return;
+  S.micCheck = false;
+  if(!audioWanted()) closeAudio();
+  const b = $('btnMicCheck');
+  if(b) b.textContent = 'Start check';
+  const f = $('micCheckFill');
+  if(f) f.style.transform = 'scaleX(0)';
+}
+$('paneCam').addEventListener('input', e => { if(e.target.id === 'zoomRange') setZoom(Number(e.target.value)); });
+$('paneCam').addEventListener('click', e => {
+  if(e.target.closest('#btnMicCheck')){ if(S.micCheck) stopMicCheck(); else startMicCheck(); }
+});
+$('paneCam').addEventListener('change', e => {
+  if(e.target.id === 'selLens'){
+    if(R){ toast('The camera can\'t be switched while recording.'); renderCamPane(); return; }
+    S.camId = e.target.value || null;
+    S.noCamera = false;
+    initCamera();
+  } else if(e.target.id === 'selMic'){
+    setSetting('micId', e.target.value);
+  }
+});
 async function onModeChosen(){
   S.modeOverride = null;
   if(settings.mode === 'timed' && !S.script.targetSec){
@@ -979,6 +1109,8 @@ async function startPrompter(id, origin){
   S.wpm = clamp(Math.round((Number(s.wpm) || settings.speed) / 5) * 5, 60, 300);
   S.modeOverride = null;
   S.front = settings.frontCamera;
+  S.camId = null;
+  S.micCheck = false;
   S.noCamera = false;
   S.pos = 0; S.playing = false; S.scrubbing = false; S.ty = null; S.readIdx = 0; S.speakNoResult = 0;
   cancelCountdown();
@@ -1022,6 +1154,9 @@ function teardownPrompter(){
   hideCamError();
   cam.token++;
   cam.busy = false;
+  clearTimeout(cam.restartT);
+  clearTimeout(cam.devT);
+  S.micCheck = false;
   stopCamera();
   closeAudio();
   releaseWakeLock();
@@ -1045,8 +1180,18 @@ async function exitPrompter(){
 /* ===================== PACING BY VOICE ===================== */
 // Voice-paced: a simple voice-activity detector on the microphone. It adapts
 // to the room's background level, so it needs no calibration step.
-const A = {ctx:null, an:null, src:null, srcStream:null, buf:null, floor:0.01, level:0, lastSpeech:0, speaking:false, gain:0};
+const A = {ctx:null, an:null, src:null, srcStream:null, buf:null, floor:0.01, level:0, peak:0, lastSpeech:0, speaking:false, gain:0};
+// An audio engine on the microphone is only started when something uses it
+// (voice pacing, or the microphone check). On some phones merely having one
+// open makes the recorded sound quieter, so plain recordings never get one.
+function audioWanted(){
+  if(S.micCheck) return true;
+  if(!S.script) return false;
+  const m = effMode();
+  return m === 'voice' || m === 'follow';
+}
 function ensureAudio(){
+  if(!audioWanted()) return;
   const AC = window.AudioContext || window.webkitAudioContext;
   if(!AC) return;
   try{
@@ -1070,7 +1215,7 @@ function attachAnalyser(){
 }
 function detachAnalyser(){
   try{ if(A.src) A.src.disconnect(); }catch(e){}
-  A.src = null; A.an = null; A.srcStream = null; A.level = 0; A.speaking = false; A.gain = 0;
+  A.src = null; A.an = null; A.srcStream = null; A.level = 0; A.peak = 0; A.speaking = false; A.gain = 0;
 }
 function closeAudio(){
   detachAnalyser();
@@ -1083,6 +1228,7 @@ function updateVad(dt, t){
   for(let i = 0; i < A.buf.length; i++){ const v = (A.buf[i] - 128) / 128; sum += v * v; }
   const rms = Math.sqrt(sum / A.buf.length);
   A.level = Math.max(rms, A.level * 0.86);
+  A.peak = Math.max(rms, A.peak * 0.992);
   // The floor drops quickly to quiet and creeps up slowly, so speech itself
   // doesn't get mistaken for background noise.
   A.floor += (rms - A.floor) * (rms < A.floor ? 0.25 : 0.003);
@@ -1166,7 +1312,85 @@ function onSpeech(e){
 }
 
 /* ===================== CAMERA ===================== */
-const cam = {stream:null, token:0, busy:false};
+const cam = {stream:null, token:0, busy:false, info:null, zoom:1, zmin:1, zmax:4, native:false,
+             devices:{video:[], audio:[]}, audioSig:'', restartT:0, devT:0, reqLong:0};
+// Resolution and data rate asked for, per quality choice.
+const QUALITY = {'720':{long:1280, short:720, mbps:8}, '1080':{long:1920, short:1080, mbps:16}, 'max':{long:3840, short:2160, mbps:35}};
+function videoBitrate(){
+  const q = QUALITY[settings.quality] || QUALITY['1080'];
+  return Math.round(q.mbps * 1e6 * (settings.fps >= 60 ? 1.5 : 1));
+}
+function videoConstraints(){
+  const q = QUALITY[settings.quality] || QUALITY['1080'];
+  // Ask for the shape the phone is actually held in (upright = tall picture).
+  const portrait = window.innerHeight >= window.innerWidth;
+  cam.reqLong = q.long;
+  const v = {width:{ideal: portrait ? q.short : q.long}, height:{ideal: portrait ? q.long : q.short}, frameRate:{ideal: settings.fps}};
+  if(S.camId) v.deviceId = {exact: S.camId}; else v.facingMode = S.front ? 'user' : 'environment';
+  return v;
+}
+function audioConstraints(){
+  const a = settings.audioMode === 'voice'
+    ? {echoCancellation:true, noiseSuppression:true, autoGainControl:true}
+    : {echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:{ideal:2}, sampleRate:{ideal:48000}};
+  if(settings.micId) a.deviceId = {exact: settings.micId};
+  return a;
+}
+async function acquireStream(){
+  const get = () => navigator.mediaDevices.getUserMedia({video: videoConstraints(), audio: audioConstraints()});
+  try{ return await get(); }
+  catch(e){
+    // A remembered camera or microphone that is no longer there: fall back to the defaults.
+    if(e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError') && (S.camId || settings.micId)){
+      S.camId = null;
+      settings.micId = '';
+      lsSet(K.settings, settings);
+      toast('The chosen camera or microphone isn\'t available, so the default one is being used.');
+      return await get();
+    }
+    throw e;
+  }
+}
+function readCamInfo(stream, video){
+  const v = stream.getVideoTracks()[0], a = stream.getAudioTracks()[0];
+  let vs = {}, as = {};
+  try{ vs = (v && v.getSettings && v.getSettings()) || {}; }catch(e){}
+  try{ as = (a && a.getSettings && a.getSettings()) || {}; }catch(e){}
+  return {
+    w: video.videoWidth || vs.width || 0, h: video.videoHeight || vs.height || 0, fps: Math.round(vs.frameRate || 0),
+    cam: (v && v.label) || '', mic: (a && a.label) || '', hasAudio: !!a,
+    ch: as.channelCount || 0, sr: as.sampleRate || 0, ec: as.echoCancellation, ns: as.noiseSuppression, agc: as.autoGainControl
+  };
+}
+async function refreshDevices(){
+  let list = [];
+  try{ list = await navigator.mediaDevices.enumerateDevices(); }catch(e){}
+  cam.devices = {video: list.filter(d => d.kind === 'videoinput'), audio: list.filter(d => d.kind === 'audioinput')};
+  const sig = cam.devices.audio.map(d => d.deviceId).join('|');
+  const changed = !!cam.audioSig && sig !== cam.audioSig;
+  cam.audioSig = sig;
+  if(isView('prompter') && !$('paneCam').hidden && !$('quickSheet').hidden) renderCamPane();
+  return changed;
+}
+function restartCamera(){
+  if(R){ toast('That change applies from your next take.'); return; }
+  if(S.noCamera || (!cam.stream && !cam.busy)) return;
+  clearTimeout(cam.restartT);
+  cam.restartT = setTimeout(() => { if(isView('prompter') && !R) initCamera(); }, 350);
+}
+if(navigator.mediaDevices && navigator.mediaDevices.addEventListener){
+  navigator.mediaDevices.addEventListener('devicechange', async () => {
+    if(!isView('prompter')) return;
+    const changed = await refreshDevices();
+    // A microphone was plugged in or removed: the open stream keeps using the old one.
+    if(changed && !R && cam.stream && !settings.micId){
+      clearTimeout(cam.devT);
+      cam.devT = setTimeout(() => {
+        if(isView('prompter') && !R && !cam.busy){ toast('A microphone or camera changed. Restarting the camera to use it.'); initCamera(); }
+      }, 600);
+    }
+  });
+}
 function camErrorText(e){
   switch(e && e.name){
     case 'Declined': return 'Camera is off. You can still rehearse the script, or turn the camera on to record.';
@@ -1203,11 +1427,7 @@ async function initCamera(){
   updateStatus();
   try{
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw {name:'Insecure'};
-    const q = settings.quality === '720' ? {w:1280, h:720} : {w:1920, h:1080};
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video:{facingMode: S.front ? 'user' : 'environment', width:{ideal:q.w}, height:{ideal:q.h}, frameRate:{ideal:30}},
-      audio:{echoCancellation:false, noiseSuppression:true, autoGainControl:true}
-    });
+    const stream = await acquireStream();
     // If the user left, flipped again or retried while this was pending, this
     // stream belongs to nobody: stop it rather than leave the camera on.
     if(my !== cam.token || !isView('prompter')){ stream.getTracks().forEach(t => t.stop()); return false; }
@@ -1215,13 +1435,18 @@ async function initCamera(){
     cam.busy = false;
     stream.getTracks().forEach(t => t.addEventListener('ended', () => onTrackEnded(stream)));
     const video = $('camera');
+    cam.info = readCamInfo(stream, video);   // available at once, so a quick tap on Record still records the details
     video.srcObject = stream;
     try{ await video.play(); }catch(e){}
+    cam.info = readCamInfo(stream, video);
     attachAnalyser();
     updateTorch();
     updateCameraMirror();
+    setupZoom();
+    layoutCamera();
     updateRecordUI();
     updateStatus();
+    refreshDevices();
     return true;
   }catch(e){
     if(my !== cam.token) return false;
@@ -1238,6 +1463,9 @@ function stopCamera(){
   if(video.srcObject) video.srcObject = null;
   torchOn = false;
   $('btnTorch').hidden = true;
+  cam.info = null; cam.native = false; cam.zoom = 1;
+  applyZoomCss();
+  updateZoomUI();
 }
 function onTrackEnded(stream){
   if(stream !== cam.stream) return;
@@ -1249,9 +1477,97 @@ function flipCamera(){
   if(cam.busy) return;
   const prev = S.front;
   S.front = !S.front;
+  S.camId = null;
   S.noCamera = false;
   initCamera().then(ok => { if(!ok && S.front !== prev && !cam.busy) S.front = prev; });
 }
+/* ---- preview framing and zoom ---- */
+// The preview box is the exact shape of the picture being recorded, so what is
+// on screen is what ends up in the video. "Fill screen" crops it instead.
+function layoutCamera(){
+  const box = $('camBox'), view = $('view-prompter'), v = $('camera');
+  const W = view.clientWidth, H = view.clientHeight;
+  let w = W, h = H, x = 0, y = 0;
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if(settings.framing === 'exact' && vw && vh && W && H){
+    const s = Math.min(W / vw, H / vh);
+    w = vw * s; h = vh * s; x = (W - w) / 2; y = (H - h) / 2;
+  }
+  if(cam.info && vw && vh){ cam.info.w = vw; cam.info.h = vh; }
+  box.style.left = x.toFixed(1) + 'px'; box.style.top = y.toFixed(1) + 'px';
+  box.style.width = w.toFixed(1) + 'px'; box.style.height = h.toFixed(1) + 'px';
+}
+function applyZoomCss(){ $('camera').style.setProperty('--z', cam.native ? 1 : cam.zoom); }
+function zoomText(){ return cam.zoom.toFixed(1) + '×'; }
+function updateZoomUI(){
+  $('zoomChip').textContent = zoomText();
+  const r = $('zoomRange');
+  if(r){ r.value = cam.zoom; const o = $('zoomOut'); if(o) o.textContent = zoomText(); }
+}
+function setupZoom(){
+  const t = cam.stream && cam.stream.getVideoTracks()[0];
+  let caps = null;
+  try{ caps = t && t.getCapabilities ? t.getCapabilities() : null; }catch(e){}
+  if(caps && caps.zoom && typeof caps.zoom.max === 'number' && caps.zoom.max > caps.zoom.min){
+    // The camera itself can zoom: sharper than cropping, and it can zoom out.
+    cam.native = true;
+    cam.zmin = caps.zoom.min;
+    cam.zmax = Math.min(caps.zoom.max, 10);
+    let cur = NaN;
+    try{ cur = t.getSettings().zoom; }catch(e){}
+    cam.zoom = isFinite(cur) ? cur : clamp(1, cam.zmin, cam.zmax);
+  } else {
+    cam.native = false; cam.zmin = 1; cam.zmax = 4; cam.zoom = 1;
+  }
+  applyZoomCss();
+  updateZoomUI();
+}
+function setZoom(z){
+  if(!cam.stream || !isFinite(z)) return;
+  z = clamp(Math.round(z * 20) / 20, cam.zmin, cam.zmax);
+  if(cam.native){
+    const t = cam.stream.getVideoTracks()[0];
+    cam.zoom = z;
+    updateZoomUI();
+    try{ t.applyConstraints({advanced:[{zoom: z}]}).catch(() => {}); }catch(e){}
+    return;
+  }
+  if(R && !R.digital){
+    toast('Zoom can\'t change during a recording on this phone. Set it first, then record.');
+    updateZoomUI();
+    return;
+  }
+  cam.zoom = z;
+  if(R && R.meta){ R.meta.zoom = Math.round(z * 100) / 100; R.meta.zoomChanged = true; }
+  applyZoomCss();
+  updateZoomUI();
+}
+// A copy of the picture cropped to the zoom, drawn onto a canvas that is
+// recorded instead of the raw camera. Only used when the phone can't zoom itself.
+function makeZoomedStream(){
+  const video = $('camera');
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if(!vw || !vh || typeof HTMLCanvasElement.prototype.captureStream !== 'function') return null;
+  const scale = Math.min(1, 1920 / Math.max(vw, vh));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(vw * scale / 2) * 2;
+  canvas.height = Math.round(vh * scale / 2) * 2;
+  const ctx = canvas.getContext('2d', {alpha:false});
+  let stopped = false, timer = 0;
+  const draw = () => {
+    if(stopped) return;
+    const z = Math.max(1, cam.zoom), sw = vw / z, sh = vh / z;
+    try{ ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height); }catch(e){}
+    if(video.requestVideoFrameCallback) video.requestVideoFrameCallback(draw);
+    else timer = setTimeout(draw, 33);
+  };
+  draw();
+  const out = canvas.captureStream(settings.fps);
+  cam.stream.getAudioTracks().forEach(t => out.addTrack(t));
+  return {stream: out, w: canvas.width, h: canvas.height,
+          stop(){ stopped = true; clearTimeout(timer); out.getVideoTracks().forEach(t => t.stop()); }};
+}
+
 let torchOn = false;
 function updateTorch(){
   torchOn = false;
@@ -1335,6 +1651,7 @@ function toggleRecording(){
     if(!cam.busy && $('camError').hidden){ S.noCamera = false; showCamError({name:'Declined'}); }
     return;
   }
+  stopMicCheck();
   ensureAudio();
   const go = () => {
     if(!cam.stream){ toast('The camera stopped before recording could start.', 'error'); return; }
@@ -1347,19 +1664,35 @@ function toggleRecording(){
 function startRecording(){
   if(!window.MediaRecorder){ toast('This browser can\'t record video.', 'error'); return false; }
   const mime = pickMime();
-  const bits = settings.quality === '720' ? 2500000 : 5000000;
+  const bits = videoBitrate();
+  // On a phone that can't zoom itself, a digital zoom has to be baked in by
+  // recording a cropped copy; without zoom the raw camera is recorded as it is.
+  let source = cam.stream, zoomed = null;
+  if(!cam.native && cam.zoom > 1.001){
+    zoomed = makeZoomedStream();
+    if(zoomed) source = zoomed.stream;
+    else toast('This browser can\'t record a zoomed picture, so the zoom won\'t be in the video.', 'error', 6000);
+  }
+  const meta = Object.assign({}, cam.info || {}, {
+    quality: settings.quality, mbps: Math.round(bits / 1e5) / 10, zoom: Math.round(cam.zoom * 100) / 100,
+    digital: !!zoomed, nativeZoom: cam.native
+  });
+  const liveVideo = $('camera');
+  if(liveVideo.videoWidth){ meta.w = liveVideo.videoWidth; meta.h = liveVideo.videoHeight; }
+  if(zoomed){ meta.w = zoomed.w; meta.h = zoomed.h; }
   let rec;
   try{
-    const opts = {videoBitsPerSecond: bits, audioBitsPerSecond: 128000};
+    const opts = {videoBitsPerSecond: bits, audioBitsPerSecond: settings.audioMode === 'voice' ? 128000 : 192000};
     if(mime) opts.mimeType = mime;
-    rec = new MediaRecorder(cam.stream, opts);
+    rec = new MediaRecorder(source, opts);
   }catch(e){
-    try{ rec = new MediaRecorder(cam.stream); }
-    catch(e2){ toast('Recording could not start in this browser.', 'error'); return false; }
+    try{ rec = new MediaRecorder(source); }
+    catch(e2){ if(zoomed) zoomed.stop(); toast('Recording could not start in this browser.', 'error'); return false; }
   }
   const r = {
     rec, mime, chunks:[], bytes:0, startTs: now(), pausedMs:0, pauseStart:0, paused:false,
     discard:false, done:false, stopping:false, warned:false, durationMs:null,
+    digital: !!zoomed, cleanup: zoomed ? zoomed.stop : null, meta,
     scriptId: S.script.id, title: S.script.title || 'Untitled script', words: S.wordText.slice(), wordTimes:[]
   };
   rec.ondataavailable = ev => {
@@ -1374,7 +1707,7 @@ function startRecording(){
   rec.onstop = () => onRecorderStop(r);
   rec.onerror = () => { toast('The recorder hit a problem. Saving what was captured.', 'error'); stopRecording(false); };
   try{ rec.start(1000); }
-  catch(e){ toast('Recording could not start.', 'error'); return false; }
+  catch(e){ if(zoomed) zoomed.stop(); toast('Recording could not start.', 'error'); return false; }
   R = r;
   S.capIdx = Math.floor(S.pos);
   requestWakeLock();
@@ -1404,6 +1737,7 @@ function stopRecording(discard){
 function onRecorderStop(r){
   if(r.done) return;
   r.done = true;
+  if(r.cleanup){ try{ r.cleanup(); }catch(e){} r.cleanup = null; }
   if(r.durationMs === null) r.durationMs = (R === r) ? recElapsed() : 0;
   if(R === r) R = null;
   updateRecordUI();
@@ -1521,16 +1855,16 @@ async function finishTake(r){
     return;
   }
   const take = {id: uid(), scriptId: r.scriptId, title: r.title, createdAt: Date.now(),
-                durationMs: Math.round(r.durationMs || 0), size: blob.size, type, blob, srt: buildSrt(r)};
+                durationMs: Math.round(r.durationMs || 0), size: blob.size, type, blob, srt: buildSrt(r), meta: r.meta || null};
   if(isView('prompter')) teardownPrompter();
   openReview(take);
   try{
     await takesPut(take);
     requestPersist();
-    setReviewNote('Kept in Takes on this device. Save it to Photos or Files for a permanent copy.');
+    setReviewMsg('Kept in Takes on this device. Save it to Photos or Files for a permanent copy.');
   }catch(e){
     memTakes.unshift(take);
-    setReviewNote('This device is out of space for Takes. Save this video now, or it will be gone when the app closes.');
+    setReviewMsg('This device is out of space for Takes. Save this video now, or it will be gone when the app closes.');
     toast('Couldn\'t keep this take in Takes. Save it now.', 'error', 8000);
   }
 }
@@ -1560,18 +1894,44 @@ $('takeList').addEventListener('click', async e => {
 });
 
 /* ===================== REVIEW ===================== */
-const RV = {take:null, url:null};
-function setReviewNote(text){ if(isView('review')) $('reviewNote').textContent = text; }
+const RV = {take:null, url:null, dims:null, msg:''};
+function setReviewMsg(text){ RV.msg = text; if(isView('review')) refreshReviewNote(); }
+function refreshReviewNote(){
+  if(RV.take) $('reviewNote').textContent = reviewInfo(RV.take, RV.dims) + (RV.msg ? '\n' + RV.msg : '');
+}
+// The player knows the real size of the finished file, which is the truth about the quality.
+function readReviewDims(){
+  const v = $('reviewVideo');
+  if(RV.take && v.videoWidth && !(RV.dims && RV.dims.w === v.videoWidth && RV.dims.h === v.videoHeight)){
+    RV.dims = {w: v.videoWidth, h: v.videoHeight};
+    refreshReviewNote();
+  }
+}
+['loadedmetadata', 'loadeddata', 'resize', 'canplay'].forEach(ev => $('reviewVideo').addEventListener(ev, readReviewDims));
 function openReview(take){
   releaseReview();
   RV.take = take;
+  RV.dims = null;
+  RV.msg = '';
   RV.url = URL.createObjectURL(take.blob);
   $('reviewVideo').src = RV.url;
   $('reviewTitle').textContent = take.title || 'Untitled script';
   $('btnCaptions').hidden = !take.srt;
   $('btnRetake').hidden = !getScripts().some(s => s.id === take.scriptId);
   show('view-review');
-  $('reviewNote').textContent = fmtDate(take.createdAt) + ' · ' + fmtTime((take.durationMs || 0) / 1000) + ' · ' + fmtBytes(take.size || 0);
+  refreshReviewNote();
+}
+// What was shot and how, so quality questions can be answered from the facts.
+function reviewInfo(take, dims){
+  let s = fmtDate(take.createdAt) + ' · ' + fmtTime((take.durationMs || 0) / 1000) + ' · ' + fmtBytes(take.size || 0);
+  const m = take.meta || {};
+  const w = (dims && dims.w) || m.w, h = (dims && dims.h) || m.h;
+  if(w && h){
+    s += '\n' + w + '×' + h + (m.fps ? ' · ' + m.fps + ' fps' : '') + (m.mbps ? ' · ' + m.mbps + ' Mbps' : '');
+    if(m.digital) s += ' · digital zoom ' + m.zoom + '×' + (m.zoomChanged ? ' (changed during the take)' : '');
+    else if(m.nativeZoom && m.zoom !== 1) s += ' · zoom ' + m.zoom + '×';
+  }
+  return s;
 }
 function releaseReview(){
   const v = $('reviewVideo');
@@ -1626,8 +1986,34 @@ $('btnPlay').addEventListener('click', togglePlay);
 $('btnRecord').addEventListener('click', toggleRecording);
 $('btnRecPause').addEventListener('click', toggleRecPause);
 $('btnRestart').addEventListener('click', () => setPos(0));
-$('btnSheet').addEventListener('click', openSheet);
-$('modePill').addEventListener('click', openSheet);
+$('btnSheet').addEventListener('click', () => openSheet('text'));
+$('modePill').addEventListener('click', () => openSheet('text'));
+$('zoomChip').addEventListener('click', () => openSheet('cam'));
+$('shTabText').addEventListener('click', () => showSheetTab('text'));
+$('shTabCam').addEventListener('click', () => showSheetTab('cam'));
+$('camera').addEventListener('loadedmetadata', layoutCamera);
+$('camera').addEventListener('resize', layoutCamera);
+
+// Pinch the picture to zoom. Touches on buttons, sliders and the script window are left alone.
+(function(){
+  const view = $('view-prompter');
+  const pts = new Map();
+  let base = null;
+  const dist = () => { const p = [...pts.values()]; return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) || 1; };
+  view.addEventListener('pointerdown', e => {
+    if(e.target.closest('button, input, select, .sheet, #promptWindow, #camError, #countdownOverlay')) return;
+    pts.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if(pts.size === 2) base = {d: dist(), z: cam.zoom};
+  });
+  view.addEventListener('pointermove', e => {
+    if(!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if(pts.size === 2 && base) setZoom(base.z * dist() / base.d);
+  });
+  const up = e => { pts.delete(e.pointerId); if(pts.size < 2) base = null; };
+  view.addEventListener('pointerup', up);
+  view.addEventListener('pointercancel', up);
+})();
 $('btnSheetClose').addEventListener('click', closeSheet);
 $('btnSheetTarget').addEventListener('click', async () => {
   const sid = S.sid;
@@ -1700,6 +2086,8 @@ document.addEventListener('keydown', e => {
     case 'ArrowLeft': case 'PageUp': jumpLines(-1); break;
     case 'ArrowRight': jumpLines(1); break;
     case 'Home': setPos(0); break;
+    case '+': case '=': setZoom(cam.zoom + 0.1); break;
+    case '-': case '_': setZoom(cam.zoom - 0.1); break;
     default: used = false;
   }
   if(used){ e.preventDefault(); armFade(); }

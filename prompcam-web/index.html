@@ -148,9 +148,12 @@
   .settingsPad{padding:14px 16px;}
 
   /* ---------- Prompter ---------- */
-  #view-prompter{position:absolute; -webkit-user-select:none; user-select:none;}
-  #camera{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000;}
-  #camera.mirrored{transform:scaleX(-1);}
+  #view-prompter{position:absolute; -webkit-user-select:none; user-select:none; touch-action:none;}
+  /* The box is resized by script to the exact shape of the recorded picture;
+     zoom (when it is a crop) scales the video inside it. */
+  #camBox{position:absolute; left:0; top:0; width:100%; height:100%; overflow:hidden; background:#000;}
+  #camera{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000; transform:scale(var(--z,1)); transform-origin:center;}
+  #camera.mirrored{transform:scaleX(-1) scale(var(--z,1));}
   #promptWindow{
     position:absolute; left:0; right:0; overflow:hidden; z-index:2; touch-action:none; cursor:grab;
     border-radius:0 0 16px 16px;
@@ -201,7 +204,7 @@
   .progress{height:4px; border-radius:2px; background:rgba(255,255,255,.22); overflow:hidden;}
   #progFill{display:block; height:100%; width:100%; background:var(--accent-2); transform-origin:left; transform:scaleX(0);}
   .progMeta{display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:13px; color:var(--dim); font-variant-numeric:tabular-nums;}
-  #modePill{background:rgba(255,255,255,.16); color:#fff; border:none; border-radius:20px; padding:6px 12px; min-height:32px; font-size:12px; font-weight:700;}
+  #modePill,#zoomChip{background:rgba(255,255,255,.16); color:#fff; border:none; border-radius:20px; padding:6px 12px; min-height:32px; font-size:12px; font-weight:700; font-variant-numeric:tabular-nums;}
   #speedRow{display:flex; align-items:center; gap:10px;}
   #speedRow input{flex:1; min-width:0; height:32px;}
   #speedRow.noSlider input,#speedRow.noSlider .stepBtn{display:none;}
@@ -233,12 +236,18 @@
   #camError p{margin:0 0 14px; font-size:14px; line-height:1.5;}
 
   .sheet{
-    position:absolute; left:0; right:0; bottom:0; z-index:8; max-height:50%; overflow-y:auto; -webkit-overflow-scrolling:touch;
+    position:absolute; left:0; right:0; bottom:0; z-index:8; max-height:58%; overflow-y:auto; -webkit-overflow-scrolling:touch;
     background:#14161A; border-radius:18px 18px 0 0; border-top:1px solid var(--line);
     padding-bottom:calc(14px + env(safe-area-inset-bottom));
   }
   .sheetHead{position:sticky; top:0; z-index:1; display:flex; align-items:center; justify-content:space-between; padding:12px 16px; background:#14161A; border-bottom:1px solid var(--line);}
-  .sheetHead h2{margin:0; font-size:17px;}
+  .sheetTabs{margin:0; flex:1; min-width:0;}
+  .sheetTabs button{min-height:38px; padding:0 6px; font-size:13px;}
+  .sheetHead{gap:10px;}
+  .levelBar{height:8px; border-radius:4px; background:var(--panel-2); overflow:hidden; margin:12px 0 4px;}
+  .levelBar span{display:block; height:100%; width:100%; background:#4ADE80; transform-origin:left; transform:scaleX(0);}
+  .hint.warn{color:#FFB84D;}
+  .hint b{color:var(--text); font-weight:600;}
 
   /* ---------- Review ---------- */
   #view-review{overflow-y:auto;}
@@ -247,7 +256,7 @@
   #reviewVideo{flex:1 1 0; min-height:30vh; width:100%; object-fit:contain; background:#000;}
   .reviewBar{flex-shrink:0; display:flex; flex-direction:column; gap:10px; max-width:560px; width:100%; margin:0 auto; padding:12px 16px calc(18px + env(safe-area-inset-bottom));}
   .reviewBar .row > .btn{flex:1;}
-  #reviewNote{margin:0; font-size:13px; color:var(--dim); text-align:center;}
+  #reviewNote{margin:0; font-size:13px; color:var(--dim); text-align:center; white-space:pre-line;}
 
   /* ---------- Modal & toasts ---------- */
   .modal{position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; padding:24px;}
@@ -274,6 +283,14 @@
     .recBtn{width:58px; height:58px;}
     .recBtn.recording::after{inset:15px;}
     #countNum{font-size:90px;}
+  }
+  @media (orientation:landscape) and (max-height:520px){
+    #view-review.active{display:grid; grid-template-columns:minmax(0,1fr) 340px; grid-template-rows:auto minmax(0,1fr);}
+    .reviewTop{grid-column:1 / -1;}
+    #reviewVideo{grid-column:1; grid-row:2; min-height:0; height:100%;}
+    .reviewBar{grid-column:2; grid-row:2; align-self:stretch; overflow-y:auto; max-width:none; gap:8px; padding:4px 14px calc(10px + env(safe-area-inset-bottom));}
+    .reviewBar .btn{min-height:40px; padding:8px 14px;}
+    #reviewNote{font-size:12px;}
   }
   @media (prefers-reduced-motion:reduce){
     *{animation:none !important; transition:none !important;}
@@ -358,7 +375,7 @@
 
 <!-- ===================== PROMPTER / CAMERA ===================== -->
 <section id="view-prompter" class="view fullscreen">
-  <video id="camera" autoplay playsinline muted></video>
+  <div id="camBox"><video id="camera" autoplay playsinline muted></video></div>
   <div id="promptWindow">
     <div id="guideLine"></div>
     <div id="promptInner"><div id="promptText" dir="auto"></div></div>
@@ -387,7 +404,10 @@
   <div class="bottomBar" id="bottomBar">
     <div class="progress" role="progressbar" aria-label="Script progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progBar"><span id="progFill"></span></div>
     <div class="progMeta fade">
-      <button id="modePill" aria-label="Change pacing mode">Speed</button>
+      <div class="row" style="gap:8px;">
+        <button id="modePill" aria-label="Change pacing mode">Speed</button>
+        <button id="zoomChip" aria-label="Zoom and camera settings">1.0×</button>
+      </div>
       <span id="timeLeft"></span>
     </div>
     <div id="speedRow" class="fade">
@@ -407,13 +427,19 @@
 
   <div id="quickSheet" class="sheet" hidden>
     <div class="sheetHead">
-      <h2>Text and pacing</h2>
+      <div class="tabs sheetTabs" role="tablist">
+        <button id="shTabText" role="tab" class="on" aria-selected="true">Text and pacing</button>
+        <button id="shTabCam" role="tab" aria-selected="false">Camera and mic</button>
+      </div>
       <button class="btn small secondary" id="btnSheetClose">Done</button>
     </div>
-    <div class="settingsPad" style="padding-bottom:0;">
-      <button class="btn small secondary" id="btnSheetTarget">Target time: off</button>
+    <div id="paneText">
+      <div class="settingsPad" style="padding-bottom:0;">
+        <button class="btn small secondary" id="btnSheetTarget">Target time: off</button>
+      </div>
+      <div id="sheetBody"></div>
     </div>
-    <div id="sheetBody"></div>
+    <div id="paneCam" hidden><div id="camBody"></div></div>
   </div>
 
   <button id="countdownOverlay" hidden aria-label="Cancel countdown">
