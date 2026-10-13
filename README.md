@@ -14,6 +14,7 @@ A free teleprompter that records you while you read. It is a plain website (no a
 - **Pause markers**: type `[PAUSE]` or `[PAUSE 3]` in a script to hold for a breath.
 - **Rehearse** without recording, **drag the text** to move through it, restart, and change text size, position and pacing from the camera screen.
 - **Recording**: starts only when you tap Record. 720p, 1080p or Maximum (4K where the phone allows), 30 or 60 fps, hold and resume, countdown, torch, camera switch.
+- **Video shape**: records tall when you hold the phone upright and wide when it's on its side. If the camera sends the other shape, the picture is cropped from the middle (tall video is sharpest at Maximum quality). Switchable in Camera and mic.
 - **Exact preview and zoom**: the preview shows precisely the picture that gets recorded (or "Fill screen" if you prefer). Pinch, or use the 1.0× button, to zoom. It uses the camera's own zoom where the browser allows it, and a digital crop otherwise.
 - **Microphone control**: studio (unprocessed) or cleaned-up sound, a microphone picker for external mics, and a level check. The Camera and mic tab also shows what the phone is really delivering.
 - **Takes**: every recording is kept on the device until you delete it. Save to Photos or Files, and download captions (`.srt`) timed to your read.

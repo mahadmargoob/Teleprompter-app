@@ -13,7 +13,7 @@ async function boot(page, { scripts = [], settings = {}, rawSettings = null, pri
     localStorage.setItem('promptcam_scripts', JSON.stringify(scripts));
     localStorage.setItem('promptcam_settings', JSON.stringify(settings));
     if (primed) localStorage.setItem('promptcam_cam_primed', 'true');
-  }, [scripts, rawSettings || Object.assign({ countdown: 0 }, settings), primed]);
+  }, [scripts, rawSettings || Object.assign({ countdown: 0, shape: 'camera' }, settings), primed]);
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   await page.goto('/index.html');
@@ -607,13 +607,13 @@ const lastGum = page => page.evaluate(() => window.__gum[window.__gum.length - 1
 const cameraSized = page => page.waitForFunction(() => cam.stream !== null && document.getElementById('camera').videoWidth > 0);
 
 test.describe('picture quality and sound', () => {
-  test('asks for the shape the phone is held in, at the chosen quality', async ({ page }) => {
+  test('asks for the camera\'s own (wide) sizes at the chosen quality, however the phone is held', async ({ page }) => {
     await spyMedia(page);
     await boot(page, { scripts: [script('a', words(80))] });
     await openPrompter(page);
     await cameraReady(page);
     let v = (await lastGum(page)).video;
-    expect([v.width.ideal, v.height.ideal]).toEqual([1080, 1920]);
+    expect([v.width.ideal, v.height.ideal]).toEqual([1920, 1080]);
     expect(v.frameRate.ideal).toBe(30);
     await page.click('#btnExit');
     await page.setViewportSize({ width: 844, height: 390 });
@@ -629,7 +629,7 @@ test.describe('picture quality and sound', () => {
     await openPrompter(page);
     await cameraReady(page);
     const v = (await lastGum(page)).video;
-    expect([v.width.ideal, v.height.ideal]).toEqual([2160, 3840]);
+    expect([v.width.ideal, v.height.ideal]).toEqual([3840, 2160]);
   });
 
   for (const [quality, fps, mbps] of [['720', 30, 8], ['1080', 30, 16], ['max', 30, 35], ['1080', 60, 24]]) {
@@ -695,7 +695,7 @@ test.describe('picture quality and sound', () => {
     await page.click('#paneCam [data-key="quality"][data-val="720"]');
     await page.waitForFunction(() => window.__gum.length === 2, null, { timeout: 4000 });
     const v = (await lastGum(page)).video;
-    expect([v.width.ideal, v.height.ideal]).toEqual([720, 1280]);
+    expect([v.width.ideal, v.height.ideal]).toEqual([1280, 720]);
   });
 
   test('a lens or microphone that has gone is replaced by the default, with a notice', async ({ page }) => {
@@ -849,5 +849,76 @@ test.describe('framing and zoom', () => {
       fire('pointerup', 1, 150, 700); fire('pointerup', 2, 350, 700);
     });
     expect(await page.evaluate(() => cam.zoom)).toBeCloseTo(2, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Video shape: tall when the phone is upright, wide when it is on its side
+// ---------------------------------------------------------------------------
+test.describe('video shape', () => {
+  test('a wide camera picture is cropped into a tall video on an upright phone, in the preview and the file', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(200))], settings: { shape: 'auto' } });
+    await openPrompter(page);
+    await cameraSized(page);
+    const fs = await page.evaluate(() => frameShape());
+    expect(fs.vw).toBeGreaterThan(fs.vh);          // the camera sent a wide picture
+    expect(fs.crop).toBe(true);
+    expect(fs.aspect).toBeCloseTo(9 / 16, 3);
+    const boxAspect = await page.evaluate(() => { const b = document.getElementById('camBox').getBoundingClientRect(); return b.width / b.height; });
+    expect(boxAspect).toBeCloseTo(9 / 16, 1);       // the preview is tall too, as on a normal phone camera
+    await recordTake(page, 2200);
+    const meta = await page.evaluate(() => takesAll().then(a => a[0].meta));
+    expect(meta.cropped).toBe(true);
+    await page.waitForFunction(() => RV.dims && RV.dims.h > RV.dims.w, null, { timeout: 8000 });
+    await expect(page.locator('#reviewNote')).toContainText('cropped to tall');
+  });
+
+  test('on its side the same camera picture is kept wide, with no cropping', async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await boot(page, { scripts: [script('a', words(200))], settings: { shape: 'auto' } });
+    await openPrompter(page);
+    await cameraSized(page);
+    expect((await page.evaluate(() => frameShape())).crop).toBe(false);
+    await page.click('#btnRecord');
+    await page.waitForFunction(() => R !== null);
+    expect(await page.evaluate(() => R.digital)).toBe(false);   // straight from the camera, best quality
+    await page.waitForTimeout(1500);
+    await page.click('#btnRecord');
+    await active(page, 'review');
+    await page.waitForFunction(() => RV.dims && RV.dims.w > RV.dims.h, null, { timeout: 8000 });
+  });
+
+  test('a camera that already sends a tall picture is used as it is', async ({ page }) => {
+    await page.addInitScript(() => {
+      const md = navigator.mediaDevices, orig = md.getUserMedia.bind(md);
+      md.getUserMedia = c => orig(Object.assign({}, c, { video: Object.assign({}, c.video, { width: { ideal: 1080 }, height: { ideal: 1920 } }) }));
+    });
+    await boot(page, { scripts: [script('a', words(200))], settings: { shape: 'auto' } });
+    await openPrompter(page);
+    await cameraSized(page);
+    const fs = await page.evaluate(() => frameShape());
+    expect(fs.vh).toBeGreaterThan(fs.vw);
+    expect(fs.crop).toBe(false);
+    await page.click('#btnRecord');
+    await page.waitForFunction(() => R !== null);
+    expect(await page.evaluate(() => R.digital)).toBe(false);
+  });
+
+  test('"As the camera sends" never crops', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(200))], settings: { shape: 'camera' } });
+    await openPrompter(page);
+    await cameraSized(page);
+    expect((await page.evaluate(() => frameShape())).crop).toBe(false);
+  });
+
+  test('the Camera tab explains the crop and lets you switch it off', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(200))], settings: { shape: 'auto' } });
+    await openPrompter(page);
+    await cameraSized(page);
+    await page.click('#btnSheet');
+    await page.click('#shTabCam');
+    await expect(page.locator('#camBody')).toContainText('cropped from the middle');
+    await page.click('#paneCam [data-key="shape"][data-val="camera"]');
+    await page.waitForFunction(() => frameShape().crop === false);
   });
 });

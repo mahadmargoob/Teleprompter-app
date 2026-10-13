@@ -116,6 +116,8 @@ const DEFS = [
   {key:'fps', type:'seg', label:'Frame rate', def:30, options:[[30,'30 fps'],[60,'60 fps']]},
   {key:'framing', type:'seg', label:'Camera preview', def:'exact', options:[['exact','Exact framing'],['fill','Fill screen']],
    help:'Exact shows the whole picture that gets recorded. Fill screen crops the edges of the preview to fill your screen, but the recording still includes them.'},
+  {key:'shape', type:'seg', label:'Video shape', def:'auto', options:[['auto','Match my phone'],['camera','As the camera sends']],
+   help:'Match my phone records tall video when you hold the phone upright and wide video when you turn it on its side. If the camera sends the other shape, the picture is cropped from the middle to fit. As the camera sends records whatever it delivers.'},
   {key:'audioMode', type:'seg', label:'Microphone processing', def:'studio', options:[['studio','Studio (none)'],['voice','Voice (cleaned up)']],
    help:'Studio records the microphone as it is, which is best for a good external microphone. Voice lets the browser reduce noise and even out the volume, which can help with a phone microphone in a noisy room.'},
   {key:'micId', type:'device', def:''},
@@ -132,7 +134,7 @@ DEFS.forEach(d => { DEF[d.key] = d; DEFAULTS[d.key] = d.def; });
 const SETTINGS_GROUPS = [
   ['Appearance', ['theme']],
   ['Prompter', ['mode','speed','fontSize','textHeight','guideLinePos','bgOpacity','margin','align','dimRead','mirror']],
-  ['Recording', ['quality','fps','framing','audioMode','countdown','frontCamera','mirrorPreview','autoStop']],
+  ['Recording', ['quality','fps','shape','framing','audioMode','countdown','frontCamera','mirrorPreview','autoStop']],
   ['Voice', ['lang']]
 ];
 const SHEET_KEYS = ['mode','fontSize','textHeight','guideLinePos','bgOpacity','margin','align','dimRead','mirror','mirrorPreview','countdown','autoStop'];
@@ -1003,6 +1005,12 @@ function camInfoHtml(){
       ? esc(i.mic || 'microphone') + (i.sr ? ' · ' + (i.sr / 1000).toFixed(1) + ' kHz' : '') + (i.ch ? ' · ' + i.ch + ' channel' + (i.ch === 1 ? '' : 's') : '') +
         '<br>Noise reduction ' + flagText(i.ns) + ' · auto volume ' + flagText(i.agc) + ' · echo cancel ' + flagText(i.ec)
       : 'none found') + '</p>';
+  const fs = frameShape();
+  if(fs && fs.crop){
+    const sc = Math.min(1, 2160 / Math.max(fs.sw, fs.sh));
+    h += '<p class="hint warn">This camera sends ' + (fs.vw > fs.vh ? 'wide' : 'tall') + ' pictures, so ' + (fs.aspect < 1 ? 'tall' : 'wide') +
+      ' video is cropped from the middle (' + Math.round(fs.sw * sc) + '×' + Math.round(fs.sh * sc) + '). Maximum quality gives a sharper result.</p>';
+  }
   if(Math.max(i.w, i.h) < q.long * 0.9){
     h += '<p class="hint warn">You asked for up to ' + q.short + 'p but this browser provided ' + i.w + '×' + i.h +
       '. Phones limit what a website can capture, and the built-in Camera app can do more.</p>';
@@ -1019,6 +1027,7 @@ function renderCamPane(){
       ? 'Uses the camera\'s own zoom, so the picture stays sharp. You can also pinch the preview.'
       : 'This phone doesn\'t let websites zoom the camera, so zoom crops the picture and looks a little softer. Set it before you press record, or pinch the preview.') +
     ' To fit more in, move back or pick a wider lens below if your phone lists one.</p></div>';
+  h += controlHtml(DEF.shape, 'cm');
   h += controlHtml(DEF.framing, 'cm');
   h += controlHtml(DEF.quality, 'cm');
   h += controlHtml(DEF.fps, 'cm');
@@ -1322,10 +1331,13 @@ function videoBitrate(){
 }
 function videoConstraints(){
   const q = QUALITY[settings.quality] || QUALITY['1080'];
-  // Ask for the shape the phone is actually held in (upright = tall picture).
-  const portrait = window.innerHeight >= window.innerWidth;
+  // Sizes are asked for the way the camera sensor is mounted (wide). iPhones
+  // match requests against those wide formats and then turn the picture to
+  // suit how the phone is held; asking for tall sizes makes them fall back to
+  // a wide format that is not turned. If the camera still sends the wrong
+  // shape, frameShape() and the canvas recorder below correct it.
   cam.reqLong = q.long;
-  const v = {width:{ideal: portrait ? q.short : q.long}, height:{ideal: portrait ? q.long : q.short}, frameRate:{ideal: settings.fps}};
+  const v = {width:{ideal: q.long}, height:{ideal: q.short}, frameRate:{ideal: settings.fps}};
   if(S.camId) v.deviceId = {exact: S.camId}; else v.facingMode = S.front ? 'user' : 'environment';
   return v;
 }
@@ -1482,6 +1494,24 @@ function flipCamera(){
   initCamera().then(ok => { if(!ok && S.front !== prev && !cam.busy) S.front = prev; });
 }
 /* ---- preview framing and zoom ---- */
+// What the finished video will look like: the camera's picture, cropped from
+// the middle when "Match my phone" is on and the camera sends the other shape.
+function frameShape(){
+  const v = $('camera');
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if(!vw || !vh) return null;
+  let aspect = vw / vh, crop = false, sw = vw, sh = vh;
+  if(settings.shape === 'auto'){
+    const wantTall = window.innerHeight >= window.innerWidth;
+    const isTall = vh >= vw;
+    if(wantTall !== isTall){
+      aspect = wantTall ? 9 / 16 : 16 / 9;
+      crop = true;
+      if(vw / vh > aspect) sw = vh * aspect; else sh = vw / aspect;
+    }
+  }
+  return {vw, vh, aspect, crop, sw, sh};
+}
 // The preview box is the exact shape of the picture being recorded, so what is
 // on screen is what ends up in the video. "Fill screen" crops it instead.
 function layoutCamera(){
@@ -1489,9 +1519,11 @@ function layoutCamera(){
   const W = view.clientWidth, H = view.clientHeight;
   let w = W, h = H, x = 0, y = 0;
   const vw = v.videoWidth, vh = v.videoHeight;
-  if(settings.framing === 'exact' && vw && vh && W && H){
-    const s = Math.min(W / vw, H / vh);
-    w = vw * s; h = vh * s; x = (W - w) / 2; y = (H - h) / 2;
+  const fs = frameShape();
+  if(settings.framing === 'exact' && fs && W && H){
+    h = Math.min(H, W / fs.aspect);
+    w = h * fs.aspect;
+    x = (W - w) / 2; y = (H - h) / 2;
   }
   if(cam.info && vw && vh){ cam.info.w = vw; cam.info.h = vh; }
   box.style.left = x.toFixed(1) + 'px'; box.style.top = y.toFixed(1) + 'px';
@@ -1544,19 +1576,20 @@ function setZoom(z){
 }
 // A copy of the picture cropped to the zoom, drawn onto a canvas that is
 // recorded instead of the raw camera. Only used when the phone can't zoom itself.
-function makeZoomedStream(){
+function makeZoomedStream(fs){
   const video = $('camera');
   const vw = video.videoWidth, vh = video.videoHeight;
   if(!vw || !vh || typeof HTMLCanvasElement.prototype.captureStream !== 'function') return null;
-  const scale = Math.min(1, 1920 / Math.max(vw, vh));
+  const sw0 = fs ? fs.sw : vw, sh0 = fs ? fs.sh : vh;   // the part of the picture that is kept
+  const scale = Math.min(1, 2160 / Math.max(sw0, sh0));
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round(vw * scale / 2) * 2;
-  canvas.height = Math.round(vh * scale / 2) * 2;
+  canvas.width = Math.round(sw0 * scale / 2) * 2;
+  canvas.height = Math.round(sh0 * scale / 2) * 2;
   const ctx = canvas.getContext('2d', {alpha:false});
   let stopped = false, timer = 0;
   const draw = () => {
     if(stopped) return;
-    const z = Math.max(1, cam.zoom), sw = vw / z, sh = vh / z;
+    const z = cam.native ? 1 : Math.max(1, cam.zoom), sw = sw0 / z, sh = sh0 / z;
     try{ ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height); }catch(e){}
     if(video.requestVideoFrameCallback) video.requestVideoFrameCallback(draw);
     else timer = setTimeout(draw, 33);
@@ -1668,14 +1701,16 @@ function startRecording(){
   // On a phone that can't zoom itself, a digital zoom has to be baked in by
   // recording a cropped copy; without zoom the raw camera is recorded as it is.
   let source = cam.stream, zoomed = null;
-  if(!cam.native && cam.zoom > 1.001){
-    zoomed = makeZoomedStream();
+  const fs = frameShape();
+  const wantZoom = !cam.native && cam.zoom > 1.001;
+  if(wantZoom || (fs && fs.crop)){
+    zoomed = makeZoomedStream(fs);
     if(zoomed) source = zoomed.stream;
-    else toast('This browser can\'t record a zoomed picture, so the zoom won\'t be in the video.', 'error', 6000);
+    else toast('This browser can\'t crop or zoom the recording, so the video will be the camera\'s picture as it is.', 'error', 6000);
   }
   const meta = Object.assign({}, cam.info || {}, {
     quality: settings.quality, mbps: Math.round(bits / 1e5) / 10, zoom: Math.round(cam.zoom * 100) / 100,
-    digital: !!zoomed, nativeZoom: cam.native
+    digital: !!zoomed, nativeZoom: cam.native, cropped: !!(zoomed && fs && fs.crop)
   });
   const liveVideo = $('camera');
   if(liveVideo.videoWidth){ meta.w = liveVideo.videoWidth; meta.h = liveVideo.videoHeight; }
@@ -1928,8 +1963,9 @@ function reviewInfo(take, dims){
   const w = (dims && dims.w) || m.w, h = (dims && dims.h) || m.h;
   if(w && h){
     s += '\n' + w + '×' + h + (m.fps ? ' · ' + m.fps + ' fps' : '') + (m.mbps ? ' · ' + m.mbps + ' Mbps' : '');
-    if(m.digital) s += ' · digital zoom ' + m.zoom + '×' + (m.zoomChanged ? ' (changed during the take)' : '');
+    if(m.digital && m.zoom > 1.001 && !m.nativeZoom) s += ' · digital zoom ' + m.zoom + '×' + (m.zoomChanged ? ' (changed during the take)' : '');
     else if(m.nativeZoom && m.zoom !== 1) s += ' · zoom ' + m.zoom + '×';
+    if(m.cropped) s += ' · cropped to ' + (h > w ? 'tall' : 'wide');
   }
   return s;
 }
