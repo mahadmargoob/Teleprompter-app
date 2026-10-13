@@ -61,7 +61,9 @@ tests/               automated checks
 
 ## Video and sound quality
 
-A website can't match the phone's built-in Camera app: it gets a plainer feed from the browser (no HDR or the phone's extra processing) and Safari decides the resolution it will hand over. PromptCam asks for the best the phone offers and records at 16 Mbps by default, but check "Camera and mic" and the line under each take to see what you actually got.
+**For the best picture and sound, use the phone's own Camera app.** In the prompter, open *Aa → Camera and mic → Record with the phone's Camera app*. That hands recording to the real Camera and microphone (external microphones included) and brings the finished video back into Takes. The Camera app can't show the script, so it suits when you know your lines or read from another screen.
+
+Recording inside PromptCam (script on screen) can't match the Camera app: it gets a plainer feed from the browser (no HDR or the phone's extra processing) and Safari decides the resolution it will hand over. PromptCam asks for the best the phone offers and records at 16 Mbps by default, but check "Camera and mic" and the line under each take to see what you actually got.
 
 If sound is quiet: open Camera and mic, run the microphone check, and choose your external microphone from the list.
 

@@ -247,6 +247,7 @@
   .levelBar{height:8px; border-radius:4px; background:var(--panel-2); overflow:hidden; margin:12px 0 4px;}
   .levelBar span{display:block; height:100%; width:100%; background:#4ADE80; transform-origin:left; transform:scaleX(0);}
   .hint.warn{color:#FFB84D;}
+  .nativeBtn{display:block; text-align:center; margin-top:4px;}
   .hint b{color:var(--text); font-weight:600;}
 
   /* ---------- Review ---------- */
@@ -383,9 +384,10 @@
 
   <div id="camError" hidden>
     <p id="camErrorMsg"></p>
-    <div class="row">
+    <div class="row" style="flex-wrap:wrap;">
       <button class="btn small" id="btnCamRetry">Try again</button>
       <button class="btn small secondary" id="btnCamSkip">Rehearse without camera</button>
+      <label for="nativeFile" class="btn small secondary nativeLbl">Use the Camera app</label>
     </div>
   </div>
 
@@ -442,6 +444,7 @@
     <div id="paneCam" hidden><div id="camBody"></div></div>
   </div>
 
+  <input type="file" id="nativeFile" accept="video/*" capture="user" hidden>
   <button id="countdownOverlay" hidden aria-label="Cancel countdown">
     <span id="countNum">3</span>
     <small>Tap to cancel</small>

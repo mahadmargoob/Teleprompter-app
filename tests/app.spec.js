@@ -922,3 +922,71 @@ test.describe('video shape', () => {
     await page.waitForFunction(() => frameShape().crop === false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Hand-off to the phone's own Camera app
+// ---------------------------------------------------------------------------
+test.describe("the phone's own Camera app", () => {
+  async function openCamTab(page) {
+    await openPrompter(page);
+    await cameraReady(page);
+    await page.click('#btnSheet');
+    await page.click('#shTabCam');
+  }
+
+  test('frees the camera, then the finished video comes back as a take', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(120))] });
+    await openCamTab(page);
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('#paneCam .nativeLbl')]);
+    expect(await page.evaluate(() => cam.stream)).toBeNull();          // camera and microphone released for the Camera app
+    expect(await page.evaluate(() => document.getElementById('nativeFile').getAttribute('capture'))).toBe('user');
+    await chooser.setFiles({ name: 'IMG_0042.MOV', mimeType: 'video/quicktime', buffer: Buffer.from('pretend this is a video file') });
+    await active(page, 'review');
+    const take = await page.evaluate(() => takesAll().then(a => ({ n: a.length, meta: a[0].meta, type: a[0].type, size: a[0].size, name: takeName(a[0]) })));
+    expect(take.n).toBe(1);
+    expect(take.meta.native).toBe(true);
+    expect(take.type).toBe('video/quicktime');
+    expect(take.size).toBe(28);
+    expect(take.name).toMatch(/\.mov$/);
+    await expect(page.locator('#reviewNote')).toContainText("phone's own Camera app");
+    expect(await page.evaluate(() => cam.stream)).toBeNull();
+  });
+
+  test('uses the back camera when that is the one selected', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(120))], settings: { frontCamera: false } });
+    await openCamTab(page);
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('#paneCam .nativeLbl')]);
+    expect(await page.evaluate(() => document.getElementById('nativeFile').getAttribute('capture'))).toBe('environment');
+    await chooser.setFiles([]);
+  });
+
+  test('closing the Camera app without recording brings the in-app camera back', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(120))] });
+    await openCamTab(page);
+    await Promise.all([page.waitForEvent('filechooser'), page.click('#paneCam .nativeLbl')]);
+    expect(await page.evaluate(() => cam.stream)).toBeNull();
+    await page.evaluate(() => document.getElementById('nativeFile').dispatchEvent(new Event('cancel')));
+    await page.waitForFunction(() => cam.stream !== null);
+    await active(page, 'prompter');
+  });
+
+  test('is refused while an in-app recording is running', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(300))] });
+    await openCamTab(page);
+    await page.click('#btnSheetClose');
+    await page.click('#btnRecord');
+    await page.waitForFunction(() => R !== null);
+    await page.click('#btnSheet');
+    await page.click('#shTabCam');
+    await page.click('#paneCam .nativeLbl');
+    await expect(page.locator('.toast')).toContainText('Stop the recording first');
+    expect(await page.evaluate(() => R !== null && cam.stream !== null)).toBe(true);
+  });
+
+  test('is offered when the camera could not be started at all', async ({ page }) => {
+    await boot(page, { scripts: [script('a', words(120))], primed: false });
+    await openPrompter(page);
+    await page.click('#modalCancel');
+    await expect(page.locator('#camError .nativeLbl')).toBeVisible();
+  });
+});

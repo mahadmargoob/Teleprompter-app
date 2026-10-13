@@ -1021,7 +1021,11 @@ function renderCamPane(){
   const on = !!cam.stream;
   const lenses = cam.devices.video.filter(d => d.deviceId);
   const mics = cam.devices.audio.filter(d => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
-  let h = '<div class="field"><label for="zoomRange"><span>Zoom</span><output id="zoomOut">' + zoomText() + '</output></label>' +
+  let h = '<div class="field"><div class="fieldLabel"><span>Best picture and sound</span></div>' +
+    '<label for="nativeFile" class="btn nativeBtn nativeLbl">Record with the phone\'s Camera app</label>' +
+    '<p class="hint">Opens the phone\'s own Camera and microphone, so the video and sound are exactly what the Camera app gives you, including an external microphone. ' +
+    'The Camera app can\'t show the script on screen, so use it when you know your lines or read from another screen. The video comes back here to save and keep with your takes.</p></div>';
+  h += '<div class="field"><label for="zoomRange"><span>Zoom</span><output id="zoomOut">' + zoomText() + '</output></label>' +
     '<input type="range" id="zoomRange" min="' + cam.zmin + '" max="' + cam.zmax + '" step="0.05" value="' + cam.zoom + '"' + (on ? '' : ' disabled') + '>' +
     '<p class="hint">' + (cam.native
       ? 'Uses the camera\'s own zoom, so the picture stays sharp. You can also pinch the preview.'
@@ -1833,6 +1837,75 @@ function buildSrt(r){
   }).join('\n');
 }
 
+/* ---- the phone's own Camera app ---- */
+// A website only gets a simplified camera and microphone feed. The one way to
+// get the real thing is to hand recording over to the Camera app and take the
+// finished video back. It can't show the script, but picture and sound are native.
+let nativePending = false;
+function resumeAfterNative(){
+  if(!nativePending) return;
+  nativePending = false;
+  if(isView('prompter') && !cam.stream && !cam.busy && !S.noCamera) initCamera();
+}
+document.addEventListener('click', e => {
+  if(!e.target.closest || !e.target.closest('.nativeLbl')) return;
+  if(R){ e.preventDefault(); toast('Stop the recording first.'); return; }
+  if(!S.script || !isView('prompter')) return;
+  // The Camera app needs the camera and microphone to be free.
+  $('nativeFile').setAttribute('capture', S.front ? 'user' : 'environment');
+  setPlaying(false);
+  cancelCountdown();
+  stopMicCheck();
+  cam.token++;
+  cam.busy = false;
+  stopCamera();
+  closeAudio();
+  nativePending = true;
+  updateStatus();
+  updateRecordUI();
+}, true);
+function videoDuration(file){
+  return new Promise(resolve => {
+    const v = document.createElement('video');
+    const url = URL.createObjectURL(file);
+    let done = false;
+    const end = ms => { if(done) return; done = true; URL.revokeObjectURL(url); v.removeAttribute('src'); resolve(ms); };
+    v.preload = 'metadata';
+    v.muted = true;
+    v.onloadedmetadata = () => end(isFinite(v.duration) ? Math.round(v.duration * 1000) : 0);
+    v.onerror = () => end(0);
+    setTimeout(() => end(0), 2500);
+    v.src = url;
+  });
+}
+$('nativeFile').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if(!f){ resumeAfterNative(); return; }
+  nativePending = false;
+  if(!S.script){ toast('That video could not be added.', 'error'); return; }
+  const sid = S.sid;
+  const dur = await videoDuration(f);
+  if(sid !== S.sid && !isView('prompter')) return;
+  const type = baseMime(f.type) || 'video/quicktime';
+  const blob = new Blob([f], {type});
+  const take = {id: uid(), scriptId: S.script.id, title: S.script.title || 'Untitled script', createdAt: Date.now(),
+                durationMs: dur, size: blob.size, type, blob, srt: '', meta: {native: true}};
+  if(isView('prompter')) teardownPrompter();
+  openReview(take);
+  try{
+    await takesPut(take);
+    requestPersist();
+    setReviewMsg('Kept in Takes on this device. Save it to Photos or Files for a permanent copy.');
+  }catch(err){
+    memTakes.unshift(take);
+    setReviewMsg('This device is out of space for Takes. Save this video now, or it will be gone when the app closes.');
+  }
+});
+// Choosing nothing: the picker reports it, and where it doesn't, coming back is the signal.
+$('nativeFile').addEventListener('cancel', resumeAfterNative);
+window.addEventListener('focus', () => { setTimeout(resumeAfterNative, 3000); });
+
 /* ===================== TAKES ===================== */
 // Finished videos are kept in the browser's database so leaving the review
 // screen never throws one away.
@@ -1877,7 +1950,8 @@ function baseMime(m){ return String(m || '').split(';')[0].trim() || 'video/webm
 function takeName(t, ext){
   const d = new Date(t.createdAt);
   const stamp = d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '-' + pad2(d.getHours()) + pad2(d.getMinutes());
-  return 'promptcam-' + slug(t.title) + '-' + stamp + '.' + (ext || (t.type.includes('mp4') ? 'mp4' : 'webm'));
+  const guess = t.type.includes('mp4') ? 'mp4' : (t.type.includes('quicktime') ? 'mov' : 'webm');
+  return 'promptcam-' + slug(t.title) + '-' + stamp + '.' + (ext || guess);
 }
 
 async function finishTake(r){
@@ -1966,6 +2040,9 @@ function reviewInfo(take, dims){
     if(m.digital && m.zoom > 1.001 && !m.nativeZoom) s += ' · digital zoom ' + m.zoom + '×' + (m.zoomChanged ? ' (changed during the take)' : '');
     else if(m.nativeZoom && m.zoom !== 1) s += ' · zoom ' + m.zoom + '×';
     if(m.cropped) s += ' · cropped to ' + (h > w ? 'tall' : 'wide');
+  }
+  if(m.native){
+    s += '\nRecorded with the phone\'s own Camera app';
   }
   return s;
 }
